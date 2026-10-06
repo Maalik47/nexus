@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: nexusgear-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nexusgear
+      POSTGRES_PASSWORD: nexusgear
+      POSTGRES_DB: nexusgear
+    ports:
+      - "5432:5432"
+    volumes:
+      - nexusgear_pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexusgear -d nexusgear"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: nexusgear-backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgres://nexusgear:nexusgear@db:5432/nexusgear
+      JWT_SECRET: change-me-in-production
+      EXTERNAL_API_KEY: change-me-external
+      CORS_ORIGIN: "*"
+    ports:
+      - "4000:4000"
+
+  frontend:
+    build: ./frontend
+    container_name: nexusgear-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  nexusgear_pgdata:
