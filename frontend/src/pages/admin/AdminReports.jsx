@@ -19,7 +19,10 @@ import {
 import { useSearchParams } from 'react-router-dom';
 import api from '../../api/client.js';
 import { formatCurrency, formatDate, formatNumber } from '../../lib/format.js';
+import { defaultDateRange, toLocalInputDate, toUtcRangeParams } from '../../lib/dateRange.js';
+import { usePagination } from '../../hooks/usePagination.js';
 import Spinner from '../../components/Spinner.jsx';
+import Pagination from '../../components/Pagination.jsx';
 
 const TABS = [
   { id: 'tabular', label: 'Ventas Tabular' },
@@ -45,19 +48,14 @@ const CHART_COLORS = [
   '#ec4899'
 ];
 
-function toInputDate(date) {
-  return date.toISOString().slice(0, 10);
-}
-
 export default function AdminReports() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab = searchParams.get('tab') || 'tabular';
   const [categories, setCategories] = useState([]);
-  const [filters, setFilters] = useState({
+  const [filters, setFilters] = useState(() => ({
     categoryId: '',
-    from: '2026-10-01',
-    to: '2026-10-31'
-  });
+    ...defaultDateRange()
+  }));
   const [includeExternal, setIncludeExternal] = useState(false);
   const [rows, setRows] = useState([]);
   const [series, setSeries] = useState([]);
@@ -67,12 +65,12 @@ export default function AdminReports() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const fileRef = useRef(null);
+  const latestRequestRef = useRef(0);
+  const pagination = usePagination(rows);
 
   const queryParams = useCallback(() => {
-    const params = {};
+    const params = toUtcRangeParams(filters);
     if (filters.categoryId) params.categoryId = filters.categoryId;
-    if (filters.from) params.from = `${filters.from}T00:00:00`;
-    if (filters.to) params.to = `${filters.to}T23:59:59`;
     return params;
   }, [filters]);
 
@@ -83,6 +81,12 @@ export default function AdminReports() {
   }
 
   const load = useCallback(async () => {
+    // Only the most recent request may update the view; slower stale responses
+    // (e.g. the external API after the toggle was switched off) are discarded.
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
+    const isStale = () => requestId !== latestRequestRef.current;
+
     setLoading(true);
     setMessage('');
     try {
@@ -90,6 +94,7 @@ export default function AdminReports() {
 
       if (includeExternal) {
         const res = await api.get('/reports/combined', { params: { ...params, groupBy: 'day' } });
+        if (isStale()) return;
         const data = res.data.data;
         setRows(data.rows);
         setSeries(
@@ -109,6 +114,7 @@ export default function AdminReports() {
           api.get('/reports/sales/series', { params: { ...params, groupBy: 'day' } }),
           api.get('/reports/sales/summary', { params })
         ]);
+        if (isStale()) return;
         setRows(rowsRes.data.data);
         setSeries(
           seriesRes.data.data.map((point) => ({
@@ -121,9 +127,9 @@ export default function AdminReports() {
         setExternalStatus(null);
       }
     } catch (err) {
-      setMessage(err.uiMessage || 'No se pudieron cargar los informes');
+      if (!isStale()) setMessage(err.uiMessage || 'No se pudieron cargar los informes');
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [queryParams, includeExternal]);
 
@@ -170,6 +176,17 @@ export default function AdminReports() {
       if (fileRef.current) fileRef.current.value = '';
     }
   }
+
+  // Drop the summary of the previous mode so the consolidated view never
+  // renders a summary whose shape belongs to the other mode (blank-page crash).
+  function handleExternalToggle(event) {
+    setSummary(null);
+    setIncludeExternal(event.target.checked);
+  }
+
+  const summaryMatchesMode = includeExternal
+    ? Boolean(summary?.local && summary?.external && summary?.total)
+    : Boolean(summary?.topProducts && summary?.byCategory);
 
   const columnCount = includeExternal ? 7 : 6;
 
@@ -249,7 +266,7 @@ export default function AdminReports() {
             id="from"
             type="date"
             value={filters.from}
-            max={toInputDate(new Date())}
+            max={toLocalInputDate(new Date())}
             onChange={(e) => setFilters({ ...filters, from: e.target.value })}
           />
         </div>
@@ -259,7 +276,7 @@ export default function AdminReports() {
             id="to"
             type="date"
             value={filters.to}
-            max={toInputDate(new Date())}
+            max={toLocalInputDate(new Date())}
             onChange={(e) => setFilters({ ...filters, to: e.target.value })}
           />
         </div>
@@ -267,7 +284,7 @@ export default function AdminReports() {
           <input
             type="checkbox"
             checked={includeExternal}
-            onChange={(e) => setIncludeExternal(e.target.checked)}
+            onChange={handleExternalToggle}
           />
           Incluir API externa
         </label>
@@ -308,6 +325,7 @@ export default function AdminReports() {
       ) : (
         <>
           {tab === 'tabular' && (
+            <>
             <div className="table-wrap">
               <table className="table">
                 <thead>
@@ -329,8 +347,10 @@ export default function AdminReports() {
                       </td>
                     </tr>
                   ) : (
-                    rows.map((row, index) => (
-                      <tr key={`${row.invoice_id}-${row.source}-${index}`}>
+                    pagination.pageItems.map((row, index) => {
+                      const rowNumber = pagination.startIndex + index + 1;
+                      return (
+                      <tr key={`${row.invoice_id}-${row.source}-${rowNumber}`}>
                         {includeExternal && (
                           <td>
                             <span
@@ -342,18 +362,21 @@ export default function AdminReports() {
                             </span>
                           </td>
                         )}
-                        <td className="row-id">{`#${String(index + 1).padStart(3, '0')}`}</td>
+                        <td className="row-id">{`#${String(rowNumber).padStart(3, '0')}`}</td>
                         <td>{row.user_name}</td>
                         <td>{formatDate(row.date)}</td>
                         <td>{row.product_name}</td>
                         <td>{row.quantity}</td>
                         <td>{formatCurrency(row.line_total)}</td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
             </div>
+            <Pagination pagination={pagination} label="Paginación del informe de ventas" />
+            </>
           )}
 
           {tab === 'chart' && (
@@ -516,7 +539,7 @@ export default function AdminReports() {
             </section>
           )}
 
-          {tab === 'consolidated' && summary && (
+          {tab === 'consolidated' && summaryMatchesMode && (
             <div className="consolidated">
               {includeExternal ? (
                 <div className="stats">

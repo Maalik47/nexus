@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -15,7 +15,10 @@ import {
 import { Link } from 'react-router-dom';
 import api from '../api/client.js';
 import { formatCurrency, formatDate, formatNumber } from '../lib/format.js';
+import { toUtcRangeParams } from '../lib/dateRange.js';
+import { usePagination } from '../hooks/usePagination.js';
 import Spinner from '../components/Spinner.jsx';
+import Pagination from '../components/Pagination.jsx';
 
 const CHART_TYPES = [
   { id: 'bar', label: 'Barras' },
@@ -31,15 +34,21 @@ export default function MyReport() {
   const [summary, setSummary] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const pagination = usePagination(rows);
+  const latestRequestRef = useRef(0);
 
   const load = useCallback(async () => {
+    // Only the most recent request may update the view (date inputs fire several changes).
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
+    const isStale = () => requestId !== latestRequestRef.current;
+
     setLoading(true);
     setMessage('');
     try {
-      const params = { groupBy: 'day' };
-      if (filters.from) params.from = `${filters.from}T00:00:00`;
-      if (filters.to) params.to = `${filters.to}T23:59:59`;
+      const params = { groupBy: 'day', ...toUtcRangeParams(filters) };
       const res = await api.get('/reports/mine', { params });
+      if (isStale()) return;
       const data = res.data.data;
       setRows(data.rows);
       setSeries(
@@ -51,9 +60,9 @@ export default function MyReport() {
       );
       setSummary(data.summary);
     } catch (err) {
-      setMessage(err.uiMessage || 'No se pudo cargar tu reporte');
+      if (!isStale()) setMessage(err.uiMessage || 'No se pudo cargar tu reporte');
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [filters]);
 
@@ -225,8 +234,8 @@ export default function MyReport() {
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((row, index) => (
-                    <tr key={`${row.invoice_id}-${index}`}>
+                  {pagination.pageItems.map((row, index) => (
+                    <tr key={`${row.invoice_id}-${pagination.startIndex + index}`}>
                       <td className="row-id">#{row.invoice_id}</td>
                       <td>{formatDate(row.date)}</td>
                       <td>{row.product_name}</td>
@@ -239,6 +248,7 @@ export default function MyReport() {
                 </tbody>
               </table>
             </div>
+            <Pagination pagination={pagination} label="Paginación del detalle de transacciones" />
           </section>
         </>
       )}
